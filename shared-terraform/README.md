@@ -62,19 +62,30 @@ those.)
 ## Usage — via the setup CLI (recommended)
 
 ```bash
-./setup.sh setup        # wizard: token (hidden input), settings, first admin
-./setup.sh deploy       # terraform init + plan + confirm + apply, then prints links
-./setup.sh urls         # per-admin storefront links, keys pre-loaded
+# First-time setup
+./setup.sh setup                                 # wizard: token, settings, first admin
+./setup.sh deploy                                # plan → confirm → apply; prints per-admin links
 
+# Day-to-day
+./setup.sh urls                                  # per-admin storefront links with keys
+./setup.sh urls JR                               # just one admin
+
+# Admins
 ./setup.sh admin add AB "Alice Bell" alice@example.com
 ./setup.sh admin remove AB
-./setup.sh deploy       # applies just that change
+./setup.sh deploy                                # plan touches only AB's resources
+
+# Secrets and settings (each writes to gitignored files, then deploy to apply)
+./setup.sh token                                 # replace PagerDuty REST API token
+./setup.sh user-token                            # set PagerDuty user-level token (needed for Slack connections)
+./setup.sh slack-token                           # set Slack bot token
+./setup.sh site-url http://3.85.144.140          # set storefront base URL
 ```
 
-The CLI stores config as Terraform auto-loaded var files (both gitignored):
-`secrets.auto.tfvars.json` (token, chmod 600) and `config.auto.tfvars.json`
-(admins, time zone, site URL). You can always bypass it and run terraform
-directly — `terraform.tfvars.example` shows the raw variable shape.
+The CLI stores everything as Terraform auto-loaded var files (both gitignored):
+`secrets.auto.tfvars.json` (tokens, chmod 600) and `config.auto.tfvars.json`
+(admins, time zone, site URL). Bypass and run terraform directly if you prefer —
+`terraform.tfvars.example` shows the full variable shape including all optional fields.
 
 Add an admin = one CLI command + deploy; the plan touches only their
 resources. Removing one destroys only their stack on the next deploy.
@@ -174,6 +185,27 @@ they're independent resources. The per-admin "Open Incident Channel" Incident Wo
 free initials from the name automatically: `JR → JRO → JROB → JOR …` (2-4
 uppercase letters). Re-adding the same email under the same initials is an
 update, not a collision.
+
+## Change events (storefront → Recent Changes tab)
+
+When a checkout failure fires, the storefront first posts two **PagerDuty change events**
+that appear on the incident's *Recent Changes* tab, backdated to simulate a real deployment:
+
+| Event | Backdated | Summary |
+|---|---|---|
+| GitHub deploy | −3 min | `v2.41.0` of `payment-service` deployed to `production` |
+| LaunchDarkly flag | −2 min | `checkout-v2-enabled` feature flag turned ON for all users |
+
+These use separate integration keys (distinct from the alert routing key). The storefront
+ops console shows two extra fields: "Change event key — GitHub deploys" and
+"Change event key — LaunchDarkly flags". Pre-load them via URL:
+
+```
+http://<site>/?pdkey=<routing>&pdchangekey=<github-key>&pdldkey=<ld-key>
+```
+
+`./setup.sh urls` shows all three keys per admin. If a change key is unset the event
+is silently skipped — the incident still fires.
 
 ## Notes & gotchas
 

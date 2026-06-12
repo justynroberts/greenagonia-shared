@@ -12,7 +12,8 @@ fails on demand.
 
 ```
 shared-usage/shared-site        the storefront (static site, runs anywhere)
-        │  POST events.pagerduty.com/v2/enqueue  (your personal routing key)
+        │  1. POST change events (GitHub deploy, LaunchDarkly flag — backdated)
+        │  2. POST alert event → your personal routing key
         ▼
 Greenagonia Event Router — JR   your event orchestration
         ▼
@@ -23,7 +24,8 @@ JR-customer-checkout            your business service lights up
 
 Everyone shares a cast of five fictional responders — Sarah SRE, Dan
 Developer, Matt Manager, Pablo Platform, Sam Security — who staff every
-team's schedules so the account looks like a real company.
+team's schedules so the account looks like a real company. There is also a
+shared **Greenagonia** team and five platform services visible to everyone.
 
 ## What you get as an admin
 
@@ -37,7 +39,17 @@ For your initials (say `JR`):
 | 3 schedules | `JR Primary / Secondary / Tertiary On-Call` |
 | Escalation policy | `JR SRE On-Call` (primary → secondary → tertiary) |
 | Event orchestration | `Greenagonia Event Router — JR` + your routing key |
-| (optional) Slack workflow | `JR — Open Incident Channel` |
+| (optional) Slack channel | `jr-incidents` — permanent channel, PD Slack connection |
+| (optional) Slack workflow | `JR — Open Incident Channel` — auto-creates a per-incident channel |
+
+**Shared with all admins** (visible to everyone in the account):
+
+| Resource | Name |
+|---|---|
+| Team | `Greenagonia` (you are a manager) |
+| 5 platform services | `api-gateway`, `data-platform`, `identity-service`, `infrastructure`, `platform-engineering` |
+| Platform orchestration | `Greenagonia Platform Router` + platform routing key |
+| Slack channel (optional) | `greenagonia-incidents` |
 
 Your **primary schedule has you on call Mon–Fri 09:00–17:00** (Europe/London
 by default); the personas cover nights and weekends, and staff the secondary
@@ -58,8 +70,8 @@ environment operator sees).
 - 🟢 A PagerDuty account where you have admin access, and a **REST API key**
   with read/write scope (*Integrations → API Access Keys*)
 - 🟢 Your email must **not** already exist as a user in that account
-- 🟡 Optional — AIOps add-on (alert grouping), Incident Workflows entitlement
-  (the three workflows + Slack channels), Slack V2 integration (channels)
+- 🟡 Optional — AIOps add-on (alert grouping), Incident Workflows entitlement,
+  Slack V2 integration + bot token + user-level API token (for Slack channels/connections)
 
 ## First-time setup (one person does this)
 
@@ -98,11 +110,14 @@ leaves this directory.
 2. The storefront front page **leads with a checkout card**. Click **Pay**.
 3. The order pipeline runs and **fails at "Charging payment"** — the default
    armed scenario is a payment-gateway card-processor timeout. The customer
-   sees a realistic error; the alert posts to PagerDuty.
+   sees a realistic error; two **change events** are posted first (backdated
+   ~2–3 min): a GitHub deploy of `payment-service v2.41.0` and a LaunchDarkly
+   feature flag change. Then the alert fires.
 4. In PagerDuty: an incident opens on `JR-payment-gateway`, pages whoever
    your primary schedule says is on call (you, during working hours),
-   `JR-customer-checkout` shows impact, and — if Slack is enabled — a
-   `jr-sre-team-<incident id>` channel appears.
+   `JR-customer-checkout` shows impact. The *Recent Changes* tab shows the
+   two change events. If Slack is enabled, the `jr-incidents` channel gets
+   a notification via the PD Slack connection.
 5. Repeated failures **dedupe into the same incident** (stable dedup key),
    so you can retry checkout all day without flooding the queue.
 
@@ -116,8 +131,10 @@ The site looks like a normal shop. To reach the controls:
 - press **Ctrl/⌘ + Shift + K**, or click the small **"operations console"**
   link in the footer, or triple-click the footer logo
 - **double-click the header logo** to change/remove the stored routing key
-- the console can switch the armed scenario to **All systems healthy**
-  (checkout then succeeds) and shows an event log of everything dispatched
+- the console shows three key fields: routing key, change event key (GitHub),
+  change event key (LaunchDarkly) — all pre-loaded from your `?pdkey=` URL
+- switch the armed scenario to **All systems healthy** (checkout then succeeds)
+- an event log shows everything dispatched in this browser session
 
 The site fires exactly **one scenario** — `bad-payment-deploy` / "Card
 processor timeouts" — an exact replica of the payload from the single-user
@@ -132,19 +149,33 @@ cd ~/work/greenagonia/shared-usage/shared-site
 python3 -m http.server 8080
 ```
 
-For a team, host it once (GitHub Pages works as-is) and set `site_url` in the
-setup wizard so `./setup.sh urls` emits links to the hosted copy.
+For a team, host it once (GitHub Pages, an EC2 instance, or any static host) and
+tell setup.sh the URL so `./setup.sh urls` emits correct links:
+
+```bash
+cd shared-terraform
+./setup.sh site-url http://3.85.144.140
+./setup.sh deploy          # re-applies; outputs get the new base URL
+./setup.sh urls            # shows updated links
+```
+
+**HTTP vs HTTPS:** the site works over plain HTTP. GitHub Pages and most CDN
+hosts serve HTTPS, which also works. Avoid `file://` if you want `?pdkey=`
+URL pre-loading (CORS restriction).
 
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
 | Failure screen says "alert NOT sent — no routing key configured" | No key in this browser. Open your `?pdkey=` link again, or double-click the header logo and paste the key. |
-| "alert NOT sent — HTTP 400" | Wrong key. It must be the **orchestration routing key** from `./setup.sh urls`, not a REST token or another integration's key. |
+| "alert NOT sent — HTTP 400" | Wrong key. It must be the **orchestration routing key** from `./setup.sh urls`, not a REST token or another integration key. |
+| Change events not appearing in Recent Changes | Change keys not set. Open ops console → paste the keys shown by `./setup.sh urls`, or use the full URL with `?pdchangekey=&pdldkey=`. |
 | Checkout succeeds when you wanted a failure | Scenario was switched to healthy in the ops console — switch it back. Default is failing. |
 | `terraform apply` → 401 | Token/region mismatch — EU accounts need region `eu` (`./setup.sh token`). |
 | Apply fails creating workflows (404) | Account lacks the Incident Workflows entitlement. Re-run `./setup.sh setup` and answer "n" to workflows (and Slack). |
+| Apply fails creating `pagerduty_slack_connection` → 401/403 | The `pagerduty_user_token` is missing or wrong. Run `./setup.sh user-token`. This resource requires a user-level token, not the account REST API key. |
 | Apply fails on the Slack step's action ID | Action catalogues are account-specific. List yours and set `slack_create_channel_action_id` — the curl is in `shared-terraform/README.md`. |
+| Slack channels error `name_taken` on apply | Channels already exist in the workspace. Import them: see the import instructions in `shared-terraform/README.md`. |
 | Apply fails on alert grouping | No AIOps add-on. In `services.tf`, switch `alert_grouping_parameters` to `type = "time"`. |
 | "user with this email already exists" | The email is already a user in the account — use a different one or remove the existing user. |
 | Incident lands on `unrouted-events` | The event's `custom_details.service` didn't match a known service name — check the payload. |

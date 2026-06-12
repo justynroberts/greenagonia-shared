@@ -2,18 +2,21 @@
 # ===========================================================================
 # setup.sh — tiny CLI for the shared Greenagonia environment.
 # ---------------------------------------------------------------------------
-#   ./setup.sh setup                      interactive first-run wizard
-#   ./setup.sh token                      set/replace the PagerDuty token
+#   ./setup.sh setup                           interactive first-run wizard
+#   ./setup.sh token                           set/replace the PagerDuty REST API token
+#   ./setup.sh user-token                      set PagerDuty user-level token (Slack connections)
+#   ./setup.sh slack-token                     set Slack bot token
+#   ./setup.sh site-url [URL]                  set the storefront base URL
 #   ./setup.sh admin add JR "Justyn Roberts" justyn@example.com
 #   ./setup.sh admin remove JR
 #   ./setup.sh admin list
-#   ./setup.sh deploy                     terraform init + plan + apply
-#   ./setup.sh urls                       per-admin storefront links
-#   ./setup.sh destroy                    tear the whole environment down
+#   ./setup.sh deploy                          terraform init + plan + apply
+#   ./setup.sh urls [INITIALS]                 per-admin storefront links + keys
+#   ./setup.sh destroy                         tear the whole environment down
 #
 # Config is stored as Terraform auto-loaded var files in this directory:
-#   secrets.auto.tfvars.json   token + region        (chmod 600, gitignored)
-#   config.auto.tfvars.json    admins, tz, site_url  (gitignored)
+#   secrets.auto.tfvars.json   tokens          (chmod 600, gitignored)
+#   config.auto.tfvars.json    admins, tz, site_url, flags  (gitignored)
 # ===========================================================================
 set -euo pipefail
 

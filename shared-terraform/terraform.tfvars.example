@@ -1,21 +1,53 @@
 # Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+# Alternatively, use ./setup.sh — it writes secrets.auto.tfvars.json and
+# config.auto.tfvars.json (both gitignored) and is the recommended approach.
 
-pagerduty_token  = "u+XXXXXXXXXXXXXXXXXXXX" # REST API key, admin/write scope
-pagerduty_region = "us"                     # "eu" for *.eu.pagerduty.com accounts
+# ------------------------------------------------------------------
+# Required
+# ------------------------------------------------------------------
+pagerduty_token  = "u+XXXXXXXXXXXXXXXXXXXX"  # REST API key, admin/write scope
+pagerduty_region = "us"                      # "eu" for *.eu.pagerduty.com accounts
 
+# ------------------------------------------------------------------
+# Slack integration (optional — set enable_slack = true to activate)
+# ------------------------------------------------------------------
+# pagerduty_user_token: user-level API token, NOT the REST API key above.
+# Required for pagerduty_slack_connection. Generate at:
+#   PagerDuty → My Profile → User Settings → Create API User Token
+pagerduty_user_token = ""
+
+# Slack bot token (xoxb-…). Required scopes: channels:manage, channels:join,
+# users:read, users:read.email. Install at api.slack.com/apps.
+slack_bot_token = ""
+
+enable_slack       = false
+slack_workspace_id = ""      # Slack team ID starting with T — from PD Slack V2 integration page
+
+# ------------------------------------------------------------------
+# Optional feature flags (both default false; paid features)
+# ------------------------------------------------------------------
+enable_incident_workflows = false   # 404s without the Incident Workflows entitlement
+enable_automation_actions = false   # 402s without Process Automation entitlement
+
+# ------------------------------------------------------------------
+# Config
+# ------------------------------------------------------------------
 # What "Mon-Fri 9-5" means for the admins' working-hours on-call layer.
 schedule_time_zone = "Europe/London"
 
 # Where the shared storefront is hosted — used to build per-admin links.
+# For a remote host use ./setup.sh site-url http://<ip-or-domain>
 site_url = "http://localhost:8080"
 
-# Incident Workflows are a paid feature; enable once entitlement confirmed.
-enable_incident_workflows = false
-
-# One entry per admin: initials → { name, email }.
+# ------------------------------------------------------------------
+# Admins
+# ------------------------------------------------------------------
+# One entry per admin: initials → { name, email, exists? }.
 # Email is their REAL PagerDuty notification address (they get the pages)
 # and must not already exist as a user in the account.
+# exists = true  — user already has an account; looked up by email.
+# exists = false — user will be created (default).
 admins = {
   JR = { name = "Justyn Roberts", email = "justyn@example.com" }
-  # AB = { name = "Alice Bell",   email = "alice@example.com" }
+  # AB = { name = "Alice Bell",   email = "alice@example.com", exists = true }
 }
