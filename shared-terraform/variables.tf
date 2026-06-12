@@ -34,9 +34,11 @@ variable "pagerduty_region" {
 
 variable "admins" {
   type = map(object({
-    name   = string
-    email  = string
-    exists = optional(bool, false)
+    name        = string
+    email       = string
+    exists      = optional(bool, false)
+    slack_email = optional(string, "")
+    skip_slack  = optional(bool, false)
   }))
   description = <<-EOT
     One entry per admin, keyed by their initials (used in every resource
@@ -45,10 +47,15 @@ variable "admins" {
       admins = {
         JR = { name = "Justyn Roberts", email = "justyn@example.com", exists = true  }
         AB = { name = "Alice Bell",     email = "alice@example.com"  }
+        NT = { name = "Nick T",         email = "nt@pd.com", slack_email = "nick@personal.com" }
       }
 
-    exists = true  — user already has a PD account; looked up by email.
-    exists = false — user will be created as a new PD user (default).
+    exists      = true  — user already has a PD account; looked up by email.
+    exists      = false — user will be created as a new PD user (default).
+    slack_email = override the email used to look up this admin in Slack (when
+                  their Slack email differs from their PagerDuty email).
+    skip_slack  = true — exclude this admin from Slack channel creation entirely
+                  (use when they don't have an account in the workspace yet).
   EOT
   validation {
     condition     = length(var.admins) > 0

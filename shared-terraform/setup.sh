@@ -87,32 +87,41 @@ cmd_admin() {
   ensure_config
   case "${1:-}" in
     add)
-      local initials="${2:-}" name="${3:-}" email="${4:-}"
-      [[ "$initials" =~ ^[A-Z]{2,4}$ ]] || die "usage: setup.sh admin add <INITIALS(2-4 caps)> <\"Full Name\"> <email>"
-      [ -n "$name" ] && [ -n "$email" ] || die "usage: setup.sh admin add <INITIALS> <\"Full Name\"> <email>"
+      local initials="${2:-}" name="${3:-}" email="${4:-}" slack_email="${5:-}"
+      [[ "$initials" =~ ^[A-Z]{2,4}$ ]] || die "usage: setup.sh admin add <INITIALS> <\"Full Name\"> <email> [slack-email]"
+      [ -n "$name" ] && [ -n "$email" ] || die "usage: setup.sh admin add <INITIALS> <\"Full Name\"> <email> [slack-email]"
       [[ "$email" == *@*.* ]] || die "'$email' doesn't look like an email"
-      python3 - "$initials" "$name" "$email" <<'EOF'
+      [ -z "$slack_email" ] || [[ "$slack_email" == *@*.* ]] || die "'$slack_email' doesn't look like an email"
+      python3 - "$initials" "$name" "$email" "$slack_email" <<'EOF'
 import json, re, sys
 cfg = json.load(open("config.auto.tfvars.json"))
 admins = cfg["admins"]
-ini, name, email = sys.argv[1:4]
+ini, name, email, slack_email = sys.argv[1:5]
+
+def entry(name, email, slack_email, existing=None):
+    e = {"name": name, "email": email}
+    if existing and existing.get("exists"):
+        e["exists"] = True
+    if slack_email:
+        e["slack_email"] = slack_email
+    return e
 
 # Same email under the requested initials = same person, just update.
 if ini in admins and admins[ini]["email"].lower() == email.lower():
-    admins[ini] = {"name": name, "email": email}
+    admins[ini] = entry(name, email, slack_email, admins[ini])
     json.dump(cfg, open("config.auto.tfvars.json", "w"), indent=2)
-    print(f"updated {ini} = {name} <{email}>")
+    suffix = f" (slack: {slack_email})" if slack_email else ""
+    print(f"updated {ini} = {name} <{email}>{suffix}")
     raise SystemExit
 
-# Initials taken by someone else → derive an alternative from the name:
-# J Roberts: JR → JRO → JROB, then widen the first-name part (JOR, …).
+# Initials taken by someone else → derive an alternative from the name.
 if ini in admins:
     parts = [re.sub(r"[^A-Za-z]", "", p) for p in name.split() if re.sub(r"[^A-Za-z]", "", p)]
     first, last = (parts[0], parts[-1]) if len(parts) > 1 else (parts[0], parts[0])
     candidates = []
-    for n in range(1, min(4, len(last)) + 1):          # JR, JRO, JROB
+    for n in range(1, min(4, len(last)) + 1):
         candidates.append((first[0] + last[:n]).upper())
-    for n in range(2, min(3, len(first)) + 1):         # JOR, JUSR …
+    for n in range(2, min(3, len(first)) + 1):
         candidates.append((first[:n] + last[0]).upper())
     candidates = [c for c in candidates if re.fullmatch(r"[A-Z]{2,4}", c)]
     pick = next((c for c in candidates if c not in admins), None)
@@ -121,9 +130,10 @@ if ini in admins:
     print(f"'{ini}' is taken by {admins[ini]['name']} — using {pick} instead")
     ini = pick
 
-admins[ini] = {"name": name, "email": email}
+admins[ini] = entry(name, email, slack_email)
 json.dump(cfg, open("config.auto.tfvars.json", "w"), indent=2)
-print(f"added {ini} = {name} <{email}>")
+suffix = f" (slack: {slack_email})" if slack_email else ""
+print(f"added {ini} = {name} <{email}>{suffix}")
 EOF
       echo "run './setup.sh deploy' to apply"
       ;;
@@ -148,7 +158,8 @@ admins = cfg["admins"]
 if not admins:
     print("no admins configured — add one: ./setup.sh admin add JR \"Justyn Roberts\" justyn@example.com")
 for ini, a in sorted(admins.items()):
-    print(f"  {ini:4} {a['name']} <{a['email']}>")
+    slack = f"  (slack: {a['slack_email']})" if a.get("slack_email") else ""
+    print(f"  {ini:4} {a['name']} <{a['email']}>{slack}")
 EOF
       ;;
     *) die "usage: setup.sh admin [add|remove|list]" ;;
@@ -432,7 +443,7 @@ Greenagonia shared environment — setup CLI
   ./setup.sh setup                                     first-run wizard (token, settings, first admin)
   ./setup.sh token                                     set/replace the PagerDuty REST API token
   ./setup.sh user-token                               set/replace the PagerDuty user-level token (needed for Slack connections)
-  ./setup.sh admin add JR "Justyn Roberts" jr@x.com    add/update an admin
+  ./setup.sh admin add JR "Justyn Roberts" jr@x.com [slack@x.com]   add/update an admin (slack email optional if different)
   ./setup.sh admin remove JR                           remove an admin (stack destroyed on next deploy)
   ./setup.sh admin list                                show configured admins
   ./setup.sh deploy                                    terraform init + plan + confirm + apply
