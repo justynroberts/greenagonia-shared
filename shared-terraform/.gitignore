@@ -1,0 +1,23 @@
+# Terraform state and providers
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.*
+terraform.tfstate.d/
+crash.log
+tfplan
+*.plan
+*.tfplan
+
+# Secrets and auto-loaded var files written by setup.sh — never commit
+# (routing keys and API tokens live here)
+*.auto.tfvars.json
+secrets.auto.tfvars.json
+config.auto.tfvars.json
+*.tfvars
+slack-secrets.json
+
+# Local env
+.env
+*.local
+.DS_Store
