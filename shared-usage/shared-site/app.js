@@ -352,7 +352,7 @@ const App = {
       `order_id: ${this.orderId}\n` +
       `error: ${scenario.errorCode}\n` +
       `component: ${scenario.component}\n` +
-      `trace_id: ${crypto.randomUUID().slice(0, 18)}`;
+      `trace_id: ${(crypto.randomUUID?.() ?? [...Array(18)].map(() => Math.random().toString(36)[2]).join('')).slice(0, 18)}`;
 
     const pdNote = document.getElementById("failure-pd-note");
     pdNote.hidden = true;

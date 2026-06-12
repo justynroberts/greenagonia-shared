@@ -290,6 +290,24 @@ for ini in sorted(routing):
 EOF
 }
 
+cmd_site_url() {
+  ensure_config
+  local URL="${1:-}"
+  if [ -z "$URL" ]; then
+    printf 'Storefront base URL (e.g. http://3.85.144.140 or https://demo.example.com): '
+    read -r URL
+  fi
+  [ -n "$URL" ] || die "no URL entered"
+  python3 - "$URL" <<'EOF'
+import json, sys
+cfg = json.load(open("config.auto.tfvars.json"))
+cfg["site_url"] = sys.argv[1].rstrip("/")
+json.dump(cfg, open("config.auto.tfvars.json", "w"), indent=2)
+print(f"site_url = {cfg['site_url']}")
+EOF
+  ok "saved — run ./setup.sh deploy to apply, then ./setup.sh urls to see new links"
+}
+
 cmd_slack_token() {
   printf 'Slack bot token (xoxb-…, input hidden): '
   read -rs SLACK_TOKEN; echo
@@ -400,6 +418,7 @@ case "${1:-help}" in
   admin)          shift; cmd_admin "$@" ;;
   deploy)         cmd_deploy ;;
   urls)           shift; cmd_urls "$@" ;;
+  site-url)       shift; cmd_site_url "$@" ;;
   slack-token)    cmd_slack_token ;;
   slack-channels) cmd_slack_channels ;;
   destroy)        cmd_destroy ;;
@@ -415,6 +434,7 @@ Greenagonia shared environment — setup CLI
   ./setup.sh admin list                                show configured admins
   ./setup.sh deploy                                    terraform init + plan + confirm + apply
   ./setup.sh urls [INITIALS]                           per-admin storefront links with keys (e.g. urls JP)
+  ./setup.sh site-url [URL]                            set the storefront base URL (e.g. http://3.85.144.140)
   ./setup.sh slack-token                               save Slack bot token + workspace ID
   ./setup.sh slack-channels                            create {ini}-incidents channels and invite each admin
   ./setup.sh destroy                                   tear everything down
