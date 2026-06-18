@@ -1,119 +1,29 @@
 /* ============================================================
    Greenagonia — Chaos Engine + PagerDuty Events API v2
    ------------------------------------------------------------
-   Single scenario: bad-payment-deploy — fires all 12 steps
-   from the CLI (cli/main.go) with identical timing, dedup
-   keys, and custom_details so resolve works from either side.
+   One scenario: bad-payment-deploy. Step data is loaded from
+   /scenarios.json (generated from the Go CLI) so the site and
+   CLI always fire identical events. Dedup keys match — resolve
+   from either side.
    ============================================================ */
 
-const PD_ENDPOINT = "https://events.pagerduty.com/v2/enqueue";
+const PD_ENDPOINT      = "https://events.pagerduty.com/v2/enqueue";
 const LS_KEY_ROUTING   = "gn_pd_routing_key";
 const LS_KEY_CHANGE    = "gn_pd_change_key";
 const LS_KEY_LD        = "gn_pd_ld_key";
 const LS_KEY_INCIDENTS = "gn_pd_active_incidents";
-const LS_KEY_SCENARIO  = "gn_chaos_scenario";
 
-// Mirrors cli/main.go: commonFields
-const COMMON = {
-  environment:       "production",
-  region:            "us-east-1",
-  cluster:           "use1-prod-1",
-  kubernetes:        true,
-  monitoring_system: "datadog",
-  datacenter:        "aws-use1",
-  runbook_url:       { github: "https://raw.githubusercontent.com/greenagonia/runbooks/refs/heads/main/runbook.md" },
-};
+// Resolved from ?pdenv= URL param; used in dedup keys to match the CLI.
+let _pdenv = "demo";
 
-// Mirrors cli/main.go: serviceMeta
-const SERVICE_META = {
-  "payment-gateway":      { namespace: "payments",   deployment: "payment-gateway",      team: "platform-payments",      runbook: "https://wiki.greenagonia.io/runbooks/payment-gateway" },
-  "checkout-api":         { namespace: "commerce",   deployment: "checkout-api",          team: "checkout",               runbook: "https://wiki.greenagonia.io/runbooks/checkout-api" },
-  "order-service":        { namespace: "commerce",   deployment: "order-service",         team: "orders",                 runbook: "https://wiki.greenagonia.io/runbooks/order-service" },
-  "notification-service": { namespace: "platform",   deployment: "notification-service",  team: "platform-notifications", runbook: "https://wiki.greenagonia.io/runbooks/notification-service" },
-};
-
-// Primary host per service (first source of each service in the steps array).
-const PRIMARY_HOSTS = {
-  "payment-gateway":      "payment-gw-prod-3",
-  "checkout-api":         "checkout-prod-7",
-  "order-service":        "order-prod-2",
-  "notification-service": "notif-prod-1",
-};
-
-// Mirrors cli/main.go: bad-payment-deploy scenario shared fields.
-const BAD_PAYMENT_SHARED = {
-  release:            "v2.4.1",
-  deploy_id:          "github-deploy-412",
-  root_cause_service: "payment-gateway",
-};
-
-// bad-payment-deploy steps — mirrors cli/main.go exactly.
-// [delaySec, service, summary, description, severity, reportingHost, extraFields]
-const BAD_PAYMENT_STEPS = [
-  [0,  "payment-gateway",      "Authentication failures elevated",         "Card authorization requests failing for the majority of Amex transactions since the v2.4.1 deploy.",         "critical", "payment-gw-prod-3", { error_class: "java.lang.NullPointerException", card_brand: "amex" }],
-  [5,  "payment-gateway",      "Card processor timeouts",                  "Calls to the Adyen processor exceeding the 10s timeout; retries are compounding the load.",                  "critical", "payment-gw-prod-7", { processor: "adyen", timeout_count: 184 }],
-  [10, "payment-gateway",      "Service health check failing",             "The /healthz endpoint has failed 12 consecutive probes; instances are being pulled from the load balancer.", "critical", "payment-gw-prod-3", { endpoint: "/healthz", consecutive_failures: 12 }],
-  [14, "payment-gateway",      "Error budget burn-rate exceeded",          "Availability SLO burning 14x faster than sustainable; budget exhausted in under 2 hours at this rate.",      "error",    "slo-monitor",       { slo: "payment-gateway-availability", burn_rate_x: 14 }],
-  [20, "checkout-api",         "Upstream payment timeouts",                "Requests to payment-gateway timing out at p99 of 9.8s; checkout requests queuing behind them.",              "error",    "checkout-prod-7",   { upstream: "payment-gateway", timeout_p99_ms: 9800 }],
-  [25, "checkout-api",         "Checkout completion rate dropped",         "Completed checkouts down from ~280/min to 12/min; customers abandoning after payment errors.",               "error",    "checkout-prod-7",   { complete_per_min: 12, baseline_per_min: 280 }],
-  [30, "checkout-api",         "Cart abandonment elevated",                "Real-user monitoring shows 64% of carts abandoned at the payment step.",                                     "warning",  "rum-monitor",       { abandonment_pct: 64 }],
-  [36, "order-service",        "Failed-order rate above baseline",         "Orders failing at 412/min against a 34/min baseline; failures correlate with payment declines.",             "error",    "order-prod-2",      { failed_per_min: 412, baseline_per_min: 34 }],
-  [41, "order-service",        "Order processing degraded",                "Order pipeline p99 at 8.2s; payment-confirmation steps dominating processing time.",                         "error",    "order-prod-2",      { p99_ms: 8200 }],
-  [46, "order-service",        "Downstream payment errors propagating",    "79% of order failures trace to upstream payment-gateway errors.",                                            "error",    "order-prod-5",      { upstream_error_pct: 79 }],
-  [52, "notification-service", "Confirmation email queue backlog growing", "order_confirmations queue depth at 18,450 and climbing; emails delayed until orders clear.",                "warning",  "notif-prod-1",      { queue: "order_confirmations", queue_depth: 18450 }],
-  [58, "notification-service", "Notification delivery delayed",            "Delivery delayed by more than 60s; current lag is 4 minutes behind real time.",                             "warning",  "notif-prod-3",      { delivery_lag_sec: 240 }],
-];
-
-function mergeDetails(service, reportingHost, extra) {
-  return {
-    ...COMMON,
-    ...(SERVICE_META[service] || {}),
-    ...BAD_PAYMENT_SHARED,
-    service,
-    scenario:       "bad-payment-deploy",
-    host:           PRIMARY_HOSTS[service] || reportingHost,
-    reporting_host: reportingHost,
-    synthetic:      true,
-    ...extra,
-  };
-}
-
-// Parse service name from a dedup key: greenagonia/demo/bad-payment-deploy/{service}/{i}
-function serviceFromDk(dk) {
-  const parts = dk.split("/");
-  return parts.length >= 4 ? parts[3] : "payment-gateway";
-}
-
-/* ------------------------------------------------------------
-   Failure scenarios — only two: healthy and bad-payment-deploy.
-   ------------------------------------------------------------ */
-const SCENARIOS = {
-  healthy: {
-    emoji: "✅",
-    name: "All systems healthy",
-    desc: "Checkout completes normally. No alerts fired.",
-    severity: null,
-    failStep: null,
-    sevClass: "sev-ok",
-  },
-  payment_timeout: {
-    emoji: "⏱️",
-    name: "Payment outage (bad-payment-deploy)",
-    desc: "Full cascade: payment-gateway → checkout-api → order-service → notification-service. 12 alerts over ~60 s. Dedup keys match the CLI — resolve from either side.",
-    severity: "critical",
-    failStep: "payment",
-    component: "payment-gateway",
-    errorCode: "GATEWAY_TIMEOUT_504",
-    userMessage: "Our payment provider is taking too long to respond. You have not been charged.",
-    slowFactor: 4,
-  },
-};
+// Populated from scenarios.json on init.
+let _scenariosDoc  = null;
+let _activeScenario = null; // the bad-payment-deploy scenario object from JSON
 
 /* ------------------------------------------------------------
    Chaos controller
    ------------------------------------------------------------ */
 const Chaos = {
-  scenario: "healthy",
   _cascadeTimers: [],
 
   get routingKey() { return localStorage.getItem(LS_KEY_ROUTING) || ""; },
@@ -129,19 +39,33 @@ const Chaos = {
   set ldKey(v) { localStorage.setItem(LS_KEY_LD, v.trim()); },
 
   get activeIncidents() {
-    try {
-      return JSON.parse(localStorage.getItem(LS_KEY_INCIDENTS)) || [];
-    } catch {
-      return [];
-    }
+    try { return JSON.parse(localStorage.getItem(LS_KEY_INCIDENTS)) || []; }
+    catch { return []; }
   },
   set activeIncidents(list) {
     localStorage.setItem(LS_KEY_INCIDENTS, JSON.stringify(list));
     this.renderIncidentCount();
   },
 
+  // UI fields used by the checkout flow.
+  get failStep()    { return _activeScenario ? _activeScenario.ui.fail_step    : null; },
+  get slowFactor()  { return _activeScenario ? _activeScenario.ui.slow_factor  : 1; },
+  get errorCode()   { return _activeScenario ? _activeScenario.ui.error_code   : ""; },
+  get userMessage() { return _activeScenario ? _activeScenario.ui.user_message : ""; },
+  get component()   { return _activeScenario ? _activeScenario.ui.component    : ""; },
+
+  // Returns the checkout behaviour object expected by index.html.
   current() {
-    return SCENARIOS[this.scenario];
+    if (!this.routingKey || !_activeScenario) {
+      return { failStep: null, slowFactor: 1, errorCode: null, userMessage: null, component: null };
+    }
+    return {
+      failStep:    _activeScenario.ui.fail_step,
+      slowFactor:  _activeScenario.ui.slow_factor,
+      errorCode:   _activeScenario.ui.error_code,
+      userMessage: _activeScenario.ui.user_message,
+      component:   _activeScenario.ui.component,
+    };
   },
 
   /* ---------- PagerDuty Events API v2 ---------- */
@@ -160,9 +84,7 @@ const Chaos = {
         body: JSON.stringify(body),
       });
       const data = await res.json().catch(() => ({}));
-      if (res.status === 202) {
-        return { ok: true, data };
-      }
+      if (res.status === 202) return { ok: true, data };
       const reason = data.message || `HTTP ${res.status}`;
       this.logEvent("error", `PD rejected event (${res.status}): ${reason}`);
       toast(`⚠️ PagerDuty rejected the event: ${reason}`, "error");
@@ -174,8 +96,6 @@ const Chaos = {
     }
   },
 
-  // Post a single change event directly to a service integration key.
-  // Uses the same endpoint as alerts but event_action = "change".
   async sendChangeEvent(integrationKey, payload) {
     if (!integrationKey) return { ok: false };
     try {
@@ -190,98 +110,90 @@ const Chaos = {
     }
   },
 
-  // Post both change events backdated so they appear in PagerDuty's
-  // Recent Changes tab as the root cause just before the incident.
-  async sendChangeEvents() {
+  // Fire change events for the active scenario. LaunchDarkly changes use ldKey;
+  // everything else uses changeKey.
+  async sendChangeEvents(sc) {
     const isoAt = (msBefore) => new Date(Date.now() - msBefore).toISOString();
-
-    if (this.changeKey) {
-      const r = await this.sendChangeEvent(this.changeKey, {
-        summary:   "Deployed payment-gateway v2.4.1 to production",
-        timestamp: isoAt(3 * 60 * 1000),
-        source:    "GitHub Actions",
-        custom_details: {
-          deployment_id: "github-deploy-412",
-          version:       "v2.4.1",
-          commit:        "a3f9c2d",
-          branch:        "release/v2.4.1",
-          environment:   "production",
-          triggered_by:  "deploy-bot",
-        },
-        links: [{ href: "https://github.com/greenagonia/payment-gateway/actions/runs/412", text: "View deployment" }],
+    for (const ch of (sc.changes || [])) {
+      const key = ch.source_tool === "LaunchDarkly" ? this.ldKey : this.changeKey;
+      if (!key) continue;
+      const r = await this.sendChangeEvent(key, {
+        summary:        ch.summary,
+        timestamp:      isoAt(ch.ago_minutes * 60 * 1000),
+        source:         ch.source_tool,
+        custom_details: { ...ch.custom },
+        links:          ch.links || [],
       });
-      if (r.ok) this.logEvent("change", "GitHub deploy · payment-gateway v2.4.1 (backdated 3m)");
-    }
-
-    if (this.ldKey) {
-      const r = await this.sendChangeEvent(this.ldKey, {
-        summary:   "Feature flag 'enable-new-payment-processor' enabled in production",
-        timestamp: isoAt(2 * 60 * 1000),
-        source:    "LaunchDarkly",
-        custom_details: {
-          flag_key:    "enable-new-payment-processor",
-          project:     "greenagonia",
-          environment: "production",
-          changed_by:  "deploy-bot",
-          from:        false,
-          to:          true,
-        },
-        links: [{ href: "https://app.launchdarkly.com/greenagonia/production/features/enable-new-payment-processor", text: "View flag in LaunchDarkly" }],
-      });
-      if (r.ok) this.logEvent("change", "LaunchDarkly · enable-new-payment-processor → true (backdated 2m)");
+      if (r.ok) {
+        const label = ch.summary.length > 60 ? ch.summary.slice(0, 57) + "…" : ch.summary;
+        this.logEvent("change", `${ch.source_tool} · ${label} (backdated ${ch.ago_minutes}m)`);
+      }
     }
   },
 
-  // Fire the bad-payment-deploy cascade.
-  // Step 0 fires immediately and its result is returned; steps 1–11 are
-  // scheduled in the background matching the CLI's exact delays.
-  async triggerIncident(scenarioKey) {
-    if (scenarioKey !== "payment_timeout") return { ok: false, reason: "not-alertable" };
+  // Fire the bad-payment-deploy cascade. Called on checkout failure AND from
+  // the ops console "Fire incident" button.
+  async triggerIncident() {
+    if (!_activeScenario) return { ok: false, reason: "scenarios not loaded" };
+    const sc = _activeScenario;
+    const doc = _scenariosDoc;
 
-    // Post change events first — backdated so they appear as root cause in Recent Changes.
-    await this.sendChangeEvents();
+    await this.sendChangeEvents(sc);
 
     const t0 = Date.now();
 
+    const primaryHost = (service) => {
+      const first = (sc.steps || []).find((s) => s.service === service);
+      return first ? first.source : service;
+    };
+
+    const mergeDetails = (service, reportingHost, extra) => ({
+      ...(doc ? doc.common : {}),
+      ...(doc && doc.service_meta ? (doc.service_meta[service] || {}) : {}),
+      ...(sc.shared || {}),
+      service,
+      scenario:       sc.name,
+      host:           primaryHost(service),
+      reporting_host: reportingHost,
+      synthetic:      true,
+      ...extra,
+    });
+
     const fireStep = async (i) => {
-      const [, service, summary, description, severity, reportingHost, extra] = BAD_PAYMENT_STEPS[i];
-      const dk = `greenagonia/demo/bad-payment-deploy/${service}/${i}`;
+      const st = sc.steps[i];
+      const dk = `greenagonia/${_pdenv}/${sc.name}/${st.service}/${i}`;
       const result = await this.sendEvent({
         event_action: "trigger",
         dedup_key:    dk,
         payload: {
-          summary,
-          source:    reportingHost,
-          severity,
-          component: service,
-          group:     "bad-payment-deploy",
+          summary:   st.summary,
+          source:    st.source,
+          severity:  st.severity,
+          component: st.service,
+          group:     sc.name,
           class:     "greenagonia-scenario",
-          custom_details: mergeDetails(service, reportingHost, { ...extra, description }),
+          custom_details: mergeDetails(st.service, st.source, { ...st.extra, description: st.desc }),
         },
       });
       if (result.ok) {
         const incidents = this.activeIncidents;
         if (!incidents.includes(dk)) incidents.push(dk);
         this.activeIncidents = incidents;
-        this.logEvent("trigger", `${severity.toUpperCase()} · ${service} · ${summary}`);
+        this.logEvent("trigger", `${st.severity.toUpperCase()} · ${st.service} · ${st.summary}`);
       }
       return result;
     };
 
-    // Fire step 0 immediately and return for UI feedback.
     const first = await fireStep(0);
 
-    // Schedule steps 1–11 in the background.
     this._cascadeTimers.forEach(clearTimeout);
-    this._cascadeTimers = BAD_PAYMENT_STEPS.slice(1).map((step, idx) => {
+    this._cascadeTimers = sc.steps.slice(1).map((st, idx) => {
       const i = idx + 1;
-      const delayMs = step[0] * 1000 - (Date.now() - t0);
+      const delayMs = st.delay_sec * 1000 - (Date.now() - t0);
       return setTimeout(() => fireStep(i), Math.max(0, delayMs));
     });
 
-    if (first.ok) {
-      toast("📟 PagerDuty alert cascade started — bad-payment-deploy", "pd");
-    }
+    if (first.ok) toast("📟 PagerDuty alert cascade started — bad-payment-deploy", "pd");
     return first;
   },
 
@@ -292,12 +204,12 @@ const Chaos = {
       client: "Greenagonia Storefront",
       client_url: location.href,
       payload: {
-        summary: "[Greenagonia] Test alert from the operations console",
-        source: "greenagonia-checkout-prod",
-        severity: "info",
+        summary:   "[Greenagonia] Test alert from the operations console",
+        source:    "greenagonia-checkout-prod",
+        severity:  "info",
         component: "ops-console",
-        group: "commerce",
-        class: "TEST_EVENT",
+        group:     "commerce",
+        class:     "TEST_EVENT",
         custom_details: { service: "payment-gateway", note: "If you can read this, the integration works." },
       },
     });
@@ -312,17 +224,16 @@ const Chaos = {
 
   async resolveAll() {
     const incidents = this.activeIncidents;
-    if (!incidents.length) {
-      toast("No active incidents to resolve");
-      return;
-    }
-    // Cancel any in-flight cascade timers.
+    if (!incidents.length) { toast("No active incidents to resolve"); return; }
+
     this._cascadeTimers.forEach(clearTimeout);
     this._cascadeTimers = [];
 
     let resolved = 0;
     for (const dk of incidents) {
-      const service = serviceFromDk(dk);
+      // greenagonia/{env}/{scenario}/{service}/{i}
+      const parts = dk.split("/");
+      const service = parts.length >= 4 ? parts[3] : "payment-gateway";
       const result = await this.sendEvent({
         event_action: "resolve",
         dedup_key:    dk,
@@ -333,24 +244,13 @@ const Chaos = {
           custom_details: { service },
         },
       });
-      if (result.ok) {
-        resolved++;
-        this.logEvent("resolve", `resolved · ${dk}`);
-      }
+      if (result.ok) { resolved++; this.logEvent("resolve", `resolved · ${dk}`); }
     }
     this.activeIncidents = [];
     toast(`✓ Resolved ${resolved} incident${resolved === 1 ? "" : "s"}`);
   },
 
   /* ---------- UI ---------- */
-
-  setScenario(key) {
-    this.scenario = key;
-    localStorage.setItem(LS_KEY_SCENARIO, key);
-    document.querySelectorAll(".scenario").forEach((el) => {
-      el.classList.toggle("active", el.dataset.key === key);
-    });
-  },
 
   logEvent(kind, msg) {
     const log = document.getElementById("event-log");
@@ -368,11 +268,7 @@ const Chaos = {
 
   renderPdStatus(cls, text) {
     const el = document.getElementById("pd-status");
-    if (cls) {
-      el.className = `chaos__status ${cls}`;
-      el.textContent = text;
-      return;
-    }
+    if (cls) { el.className = `chaos__status ${cls}`; el.textContent = text; return; }
     if (this.routingKey) {
       el.className = "chaos__status ok";
       el.textContent = `Key configured (…${this.routingKey.slice(-4)})`;
@@ -389,33 +285,22 @@ const Chaos = {
     el.classList.toggle("hot", n > 0);
   },
 
-  renderScenarios() {
-    const list = document.getElementById("scenario-list");
-    list.innerHTML = Object.entries(SCENARIOS)
-      .map(([key, s]) => {
-        const sev = s.severity
-          ? `<span class="sev-tag sev-tag--${s.severity}">${s.severity}</span>`
-          : "";
-        return `
-        <button class="scenario ${s.sevClass || ""} ${key === this.scenario ? "active" : ""}" data-key="${key}">
-          <span class="scenario__emoji">${s.emoji}</span>
-          <span>
-            <span class="scenario__name">${s.name} ${sev}</span>
-            <span class="scenario__desc">${s.desc}</span>
-          </span>
-        </button>`;
-      })
-      .join("");
-    list.querySelectorAll(".scenario").forEach((el) => {
-      el.addEventListener("click", () => this.setScenario(el.dataset.key));
-    });
-  },
+  async init() {
+    // Read env from URL param — must match the CLI env for dedup keys to align.
+    const params = new URLSearchParams(location.search);
+    if (params.get("pdenv")) _pdenv = params.get("pdenv");
 
-  init() {
-    const saved = localStorage.getItem(LS_KEY_SCENARIO);
-    this.scenario = saved && SCENARIOS[saved] ? saved : "payment_timeout";
+    // Load scenario definitions from the CLI-generated JSON.
+    try {
+      const res = await fetch("/scenarios.json");
+      if (res.ok) {
+        _scenariosDoc   = await res.json();
+        _activeScenario = (_scenariosDoc.scenarios || []).find((s) => s.name === "bad-payment-deploy") || null;
+      }
+    } catch (e) {
+      console.warn("Could not load scenarios.json:", e.message);
+    }
 
-    this.renderScenarios();
     this.renderPdStatus();
     this.renderIncidentCount();
 
@@ -436,31 +321,21 @@ const Chaos = {
     }
 
     document.getElementById("pd-test").addEventListener("click", () => this.sendTestAlert());
-    document.getElementById("pd-fire-cascade").addEventListener("click", () => this.triggerIncident("payment_timeout"));
+    document.getElementById("pd-fire-cascade").addEventListener("click", () => this.triggerIncident());
     document.getElementById("pd-resolve-all").addEventListener("click", () => this.resolveAll());
     document.getElementById("log-clear").addEventListener("click", () => {
       document.getElementById("event-log").innerHTML =
         '<div class="event-log__empty">No events dispatched yet</div>';
     });
 
-    const panel = document.getElementById("chaos-panel");
+    const panel   = document.getElementById("chaos-panel");
     const overlay = document.getElementById("chaos-overlay");
-    const open = () => {
-      panel.classList.add("open");
-      overlay.classList.add("show");
-    };
-    const close = () => {
-      panel.classList.remove("open");
-      overlay.classList.remove("show");
-    };
+    const open  = () => { panel.classList.add("open");    overlay.classList.add("show"); };
+    const close = () => { panel.classList.remove("open"); overlay.classList.remove("show"); };
+
     document.getElementById("chaos-close").addEventListener("click", close);
     const opsLink = document.getElementById("ops-link");
-    if (opsLink) {
-      opsLink.addEventListener("click", (e) => {
-        e.preventDefault();
-        open();
-      });
-    }
+    if (opsLink) opsLink.addEventListener("click", (e) => { e.preventDefault(); open(); });
     overlay.addEventListener("click", close);
     document.addEventListener("keydown", (e) => {
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "k") {
@@ -472,25 +347,20 @@ const Chaos = {
 
     const brand = document.getElementById("footer-brand");
     if (brand) {
-      let clicks = 0;
-      let timer = null;
+      let clicks = 0, timer = null;
       brand.addEventListener("click", () => {
         clicks++;
         clearTimeout(timer);
         timer = setTimeout(() => (clicks = 0), 600);
-        if (clicks >= 3) {
-          clicks = 0;
-          open();
-        }
+        if (clicks >= 3) { clicks = 0; open(); }
       });
     }
 
-    const params = new URLSearchParams(location.search);
     let keyParamsFound = false;
     if (params.get("pdkey")) {
       this.routingKey = params.get("pdkey");
-      keyInput.value = this.routingKey;
-      keyParamsFound = true;
+      keyInput.value  = this.routingKey;
+      keyParamsFound  = true;
       params.delete("pdkey");
     }
     if (params.get("pdchangekey")) {
@@ -505,15 +375,15 @@ const Chaos = {
       keyParamsFound = true;
       params.delete("pdldkey");
     }
+    params.delete("pdenv");
+
     if (keyParamsFound) {
-      // New session — arm the failure scenario so checkout fails on first attempt.
-      this.setScenario("payment_timeout");
-      this.logEvent("resolve", "PagerDuty keys loaded from URL");
+      this.logEvent("resolve", `PagerDuty keys loaded from URL (env: ${_pdenv})`);
       const clean = location.pathname + (params.size ? `?${params}` : "") + location.hash;
       history.replaceState(null, "", clean);
       toast("📟 PagerDuty keys saved", "pd");
     }
-    if (params.get("ops") === "1") open();
+    if (new URLSearchParams(location.search).get("ops") === "1") open();
 
     this.initKeyPrompt();
   },
@@ -521,17 +391,12 @@ const Chaos = {
   /* ---------- first-run routing key prompt ---------- */
 
   initKeyPrompt() {
-    const modal = document.getElementById("pdkey-modal");
-    const input = document.getElementById("pdkey-input");
-    const clearBtn = document.getElementById("pdkey-clear");
+    const modal        = document.getElementById("pdkey-modal");
+    const input        = document.getElementById("pdkey-input");
+    const clearBtn     = document.getElementById("pdkey-clear");
     const consoleInput = document.getElementById("pd-routing-key");
 
-    const openPrompt = () => {
-      input.value = "";
-      clearBtn.hidden = !this.routingKey;
-      modal.hidden = false;
-      setTimeout(() => input.focus(), 60);
-    };
+    const openPrompt  = () => { input.value = ""; clearBtn.hidden = !this.routingKey; modal.hidden = false; setTimeout(() => input.focus(), 60); };
     const closePrompt = () => (modal.hidden = true);
 
     const saveKey = () => {
@@ -544,20 +409,9 @@ const Chaos = {
       closePrompt();
     };
 
-    document.getElementById("pdkey-form").addEventListener("submit", (e) => {
-      e.preventDefault();
-      saveKey();
-    });
-
-    input.addEventListener("input", () => {
-      if (input.value.trim().length >= 32) saveKey();
-    });
-
-    document.getElementById("pdkey-skip").addEventListener("click", () => {
-      sessionStorage.setItem("gn_pdkey_skip", "1");
-      closePrompt();
-    });
-
+    document.getElementById("pdkey-form").addEventListener("submit", (e) => { e.preventDefault(); saveKey(); });
+    input.addEventListener("input", () => { if (input.value.trim().length >= 32) saveKey(); });
+    document.getElementById("pdkey-skip").addEventListener("click", () => { sessionStorage.setItem("gn_pdkey_skip", "1"); closePrompt(); });
     clearBtn.addEventListener("click", () => {
       localStorage.removeItem(LS_KEY_ROUTING);
       this.renderPdStatus();
@@ -571,21 +425,11 @@ const Chaos = {
       let clickTimer = null;
       logo.addEventListener("click", (e) => {
         e.preventDefault();
-        if (clickTimer) {
-          clearTimeout(clickTimer);
-          clickTimer = null;
-          openPrompt();
-        } else {
-          clickTimer = setTimeout(() => {
-            clickTimer = null;
-            location.href = logo.getAttribute("href");
-          }, 280);
-        }
+        if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; openPrompt(); }
+        else { clickTimer = setTimeout(() => { clickTimer = null; location.href = logo.getAttribute("href"); }, 280); }
       });
     }
 
-    if (!this.routingKey && !sessionStorage.getItem("gn_pdkey_skip")) {
-      openPrompt();
-    }
+    if (!this.routingKey && !sessionStorage.getItem("gn_pdkey_skip")) openPrompt();
   },
 };
